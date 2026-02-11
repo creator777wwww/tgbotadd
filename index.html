@@ -1,0 +1,56 @@
+html
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Оплата подписки</title>
+    <script src="https://telegram.org"></script>
+    <script src="https://unpkg.com"></script>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background-color: #141419; color: white; text-align: center; }
+        #ton-connect { margin-bottom: 20px; }
+        .pay-btn { padding: 15px 30px; font-size: 18px; border-radius: 12px; border: none; background: #0088cc; color: white; cursor: pointer; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h2>Оплата доступа в канал</h2>
+    <p>Подключите кошелек и нажмите кнопку оплаты</p>
+    
+    <div id="ton-connect"></div>
+    <button id="pay-button" class="pay-btn" style="display: none;" onclick="pay()">Оплатить 1 TON</button>
+
+    <script>
+        const tonConnectUI = new TONConnectUI.TonConnectUI({
+            manifestUrl: 'https://creator777wwww.github.io',
+            buttonRootId: 'ton-connect',
+            twaReturnUrl: 'https://t.me/Aadminnudsbot'
+        });
+
+        // Показываем кнопку только если кошелек подключен
+        tonConnectUI.onStatusChange(wallet => {
+            document.getElementById('pay-button').style.display = wallet ? 'block' : 'none';
+        });
+
+        async function pay() {
+            const transaction = {
+                validUntil: Math.floor(Date.now() / 1000) + 600,
+                messages: [{
+                    address: "UQCGcEe4e7jxCQhfxLRVaR9Lc9uaWKQ1mRHMxedZP9THDfpp",
+                    amount: "1000000000" // 1 TON (в нанотонах)
+                }]
+            };
+
+            try {
+                const result = await tonConnectUI.sendTransaction(transaction);
+                // Отправляем BOC (чек оплаты) обратно в бот
+                Telegram.WebApp.sendData(result.boc);
+                // Закрываем Mini App
+                Telegram.WebApp.close();
+            } catch (e) {
+                alert("Ошибка транзакции: " + e.message);
+            }
+        }
+    </script>
+</body>
+</html>
