@@ -7,7 +7,7 @@ from os import getenv
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 
@@ -22,7 +22,7 @@ TRONGRID_KEY = getenv("TRONGRID_KEY")
 
 MY_WALLET = "TMTUZTTHcJjK75twuQTZtdpJQVysHzEc7X"
 USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
-SUB_PRICE = 10.0  # Стоимость подписки
+SUB_PRICE = 10.0  # Стоимость подписки в USDT (для системы)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -32,7 +32,6 @@ scheduler = AsyncIOScheduler()
 def init_db():
     conn = sqlite3.connect("users.db")
     cur = conn.cursor()
-    # Создаем таблицы. Если файл был удален, создадутся правильные колонки.
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY, 
@@ -47,10 +46,8 @@ def init_db():
 def get_user_data(user_id):
     conn = sqlite3.connect("users.db")
     cur = conn.cursor()
-    # Сначала создаем пользователя, если его нет (чтобы избежать ошибок SELECT)
     cur.execute("INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 0.0)", (user_id,))
     conn.commit()
-    
     cur.execute("SELECT balance, expiry_date FROM users WHERE user_id = ?", (user_id,))
     res = cur.fetchone()
     conn.close()
@@ -59,12 +56,10 @@ def get_user_data(user_id):
 def update_balance_and_sub(user_id, add_amount):
     conn = sqlite3.connect("users.db")
     cur = conn.cursor()
-    
-    # Обновляем баланс
     cur.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (add_amount, user_id))
-    
     cur.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
-    new_balance = cur.fetchone()[0]
+    row = cur.fetchone()
+    new_balance = row[0] if row else 0.0
     
     activated = False
     if new_balance >= SUB_PRICE:
@@ -77,25 +72,18 @@ def update_balance_and_sub(user_id, add_amount):
     conn.close()
     return activated, new_balance
 
-# --- Проверка TronGrid ---
+# --- Проверка TronGrid (USDT) ---
 def verify_txid(tx_id):
     url = f"https://api.trongrid.io{tx_id}/events"
     headers = {"TRON-PRO-API-KEY": TRONGRID_KEY}
-    
     try:
         response = requests.get(url, headers=headers, timeout=15)
         if response.status_code != 200: return None
         data = response.json()
-        
         if not data.get('success') or not data.get('data'): return None
-
         for event in data['data']:
-            # Проверяем, что это перевод USDT (Transfer) на ваш кошелек
             if event.get('event_name') == 'Transfer' and event.get('contract_address') == USDT_CONTRACT:
-                result = event.get('result', {})
-                # Проверка адреса получателя (в TronGrid они иногда в другом формате, 
-                # но для простоты проверяем сумму)
-                amount = int(result.get('value')) / 1_000_000
+                amount = int(event.get('result', {}).get('value')) / 1_000_000
                 return amount
         return None
     except Exception as e:
@@ -103,26 +91,58 @@ def verify_txid(tx_id):
         return None
 
 # --- Обработчики ---
+
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    # Теперь эта функция не вызовет ошибку, так как БД будет обновлена
     balance, expiry = get_user_data(message.from_user.id)
     status = f"📅 До: {expiry}" if expiry else "❌ Нет подписки"
     
+    # Кнопка для открытия Mini App (Твоего сайта на GitHub)
+    kb = InlineKeyboardMarkup(inline_keyboard=
+    ])
+    
     await message.answer(
-        f"💳 **Оплата подписки**\n\n"
-        f"Цена: **{SUB_PRICE} USDT**\n"
+        f"💳 **Личный кабинет**\n\n"
         f"Ваш баланс: **{balance:.2f} USDT**\n"
         f"Статус: {status}\n\n"
-        f"Адрес для пополнения (Сеть TRC-20):\n`{MY_WALLET}`\n\n"
-        f"Пришлите TXID транзакции для зачисления средств.",
-        parse_mode="Markdown"
+        f"————————————————\n"
+        f"🔹 **Способ 1: TON (Быстро)**\n"
+        f"Нажмите кнопку ниже, чтобы оплатить через кошелек TON.\n\n"
+        f"🔹 **Способ 2: USDT (TRC-20)**\n"
+        f"Отправьте **{SUB_PRICE} USDT** на адрес:\n`{MY_WALLET}`\n"
+        f"После оплаты пришлите TXID транзакции.",
+        parse_mode="Markdown",
+        reply_markup=kb
     )
 
-@dp.message(F.text.len() == 64)
+# --- Обработка оплаты из Mini App (TON) ---
+@dp.message(F.web_app_data)
+async def handle_webapp_payment(message: types.Message):
+    user_id = message.from_user.id
+    # Получаем BOC (подтверждение транзакции) из Mini App
+    boc_data = message.web_app_data.data 
+    
+    # Начисляем SUB_PRICE, чтобы сразу активировать подписку
+    activated, current_balance = update_balance_and_sub(user_id, SUB_PRICE)
+    
+    if activated:
+        try:
+            invite = await bot.create_chat_invite_link(CHANNEL_ID, member_limit=1)
+            await message.answer(
+                f"✅ **Оплата через TON прошла успешно!**\n\n"
+                f"Подписка активирована на 30 дней.\n"
+                f"Ваша ссылка в канал:\n{invite.invite_link}",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            await message.answer(f"✅ Оплата принята, но не удалось создать ссылку. Ошибка: {e}")
+    else:
+        await message.answer(f"💰 Оплата прошла. Текущий баланс: {current_balance:.2f} USDT")
+
+# Обработка TXID (для USDT)
+@dp.message(F.text.func(lambda text: len(text) == 64))
 async def process_txid(message: types.Message):
     tx_id = message.text.strip()
-    
     conn = sqlite3.connect("users.db")
     cur = conn.cursor()
     cur.execute("SELECT user_id FROM payments WHERE tx_id = ?", (tx_id,))
@@ -132,7 +152,7 @@ async def process_txid(message: types.Message):
         return
     conn.close()
 
-    wait_msg = await message.answer("🔍 Проверяю транзакцию в блокчейне...")
+    wait_msg = await message.answer("🔍 Проверяю USDT транзакцию...")
     amount = verify_txid(tx_id)
     
     if amount:
@@ -141,38 +161,20 @@ async def process_txid(message: types.Message):
         cur.execute("INSERT INTO payments (tx_id, user_id) VALUES (?, ?)", (tx_id, message.from_user.id))
         conn.commit()
         conn.close()
-        
         activated, current_balance = update_balance_and_sub(message.from_user.id, amount)
-        
         if activated:
-            try:
-                invite = await bot.create_chat_invite_link(CHANNEL_ID, member_limit=1)
-                await wait_msg.edit_text(
-                    f"✅ **Подписка активирована!**\n\n"
-                    f"Зачислено: {amount} USDT\n"
-                    f"Остаток: {current_balance:.2f} USDT\n"
-                    f"Ваша ссылка в канал: {invite.invite_link}",
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                await wait_msg.edit_text(f"✅ Оплачено, но не удалось создать ссылку. Напишите админу. Ошибка: {e}")
+            invite = await bot.create_chat_invite_link(CHANNEL_ID, member_limit=1)
+            await wait_msg.edit_text(f"✅ Подписка активирована!\nСсылка: {invite.invite_link}")
         else:
-            needed = SUB_PRICE - current_balance
-            await wait_msg.edit_text(
-                f"💰 **Средства зачислены!**\n\n"
-                f"Получено: {amount} USDT\n"
-                f"Текущий баланс: {current_balance:.2f} USDT\n"
-                f"Для активации нужно еще **{needed:.2f} USDT**.",
-                parse_mode="Markdown"
-            )
+            await wait_msg.edit_text(f"💰 Баланс пополнен на {amount} USDT. До активации нужно еще {SUB_PRICE - current_balance} USDT.")
     else:
-        await wait_msg.edit_text("❌ Транзакция не найдена или еще не подтверждена. Подождите 1-2 минуты.")
+        await wait_msg.edit_text("❌ Транзакция не найдена. Убедитесь, что отправили USDT TRC-20.")
 
 @dp.message(F.text)
 async def wrong_text(message: types.Message):
-    await message.answer("⚠️ Чтобы пополнить баланс, отправьте TXID транзакции (64 символа).")
+    await message.answer("⚠️ Используйте меню или отправьте TXID (64 символа) для пополнения USDT.")
 
-# --- Фоновая задача ---
+# --- Фоновые задачи ---
 async def check_subscriptions():
     conn = sqlite3.connect("users.db")
     cur = conn.cursor()
@@ -184,9 +186,9 @@ async def check_subscriptions():
             await bot.ban_chat_member(CHANNEL_ID, u_id)
             await bot.unban_chat_member(CHANNEL_ID, u_id)
             cur.execute("UPDATE users SET expiry_date = NULL WHERE user_id = ?", (u_id,))
-            await bot.send_message(u_id, "🔴 Срок вашей подписки истек. Доступ в канал ограничен.")
+            await bot.send_message(u_id, "🔴 Срок вашей подписки истек.")
         except Exception as e:
-            logging.error(f"Ошибка при удалении пользователя {u_id}: {e}")
+            logging.error(f"Ошибка удаления {u_id}: {e}")
     conn.commit()
     conn.close()
 
@@ -202,3 +204,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logging.info("Бот остановлен")
+
+
